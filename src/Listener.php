@@ -40,10 +40,10 @@ class Listener
 
                 if ($relaySource === 'Receipt' and !is_null($storedID) and $storedID !== 0) {
                     $this->relayMessage(
-                        destinationType: $relayType,
-                        id: $storedID,
-                        ts: $timestamp,
-                        message: $data['messages'][0]
+                        $relayType,
+                        $storedID,
+                        $timestamp,
+                        $data['messages'][0]
                     );
                 }
 
@@ -114,10 +114,10 @@ class Listener
         foreach ($foundMessages as $eachMessage) {
 
             $this->relayMessage(
-                destinationType: $destinationType,
-                id: (int)$eachMessage["id"],
-                ts: (float)$eachMessage["message_ts"],
-                message: json_decode($eachMessage["message"], true)
+                $destinationType,
+                (int)$eachMessage["id"],
+                (float)$eachMessage["message_ts"],
+                json_decode($eachMessage["message"], true)
             );
 
         }
@@ -176,6 +176,7 @@ class Listener
 
             $context = [
                 "http" => [
+                    "ignore_errors" => true,
                     "header" => [
                         "Content-Type: application/json"
                     ],
@@ -265,13 +266,14 @@ class Listener
 
                 $finalizedContext = stream_context_create($context);
                 $request = file_get_contents(
-                    filename: $destinationURL,
-                    context: $finalizedContext
+                    $destinationURL,
+                    false,
+                    $finalizedContext
                 );
 
                 $responseHeaders = $this->parseHeaders($http_response_header);
 
-                if (str_contains($responseHeaders["Status Code"], "204") or str_contains($responseHeaders["Status Code"], "200")) {
+                if (strpos($responseHeaders["Status Code"], "204") !== false or strpos($responseHeaders["Status Code"], "200") !== false) {
 
                     $update = $this->getPDO()->prepare('UPDATE messages SET relayed=:relayed WHERE id=:id');
                     $update->execute([':relayed' => 1, ':id' => $id]);
