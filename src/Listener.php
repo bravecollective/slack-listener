@@ -24,20 +24,36 @@ class Listener
     {
         $this->out('Starting.');
 
+        $relayType = (string) getenv('SLACK_LISTENER_RELAY_TYPE');
+        $relaySource = (string) getenv('SLACK_LISTENER_RELAY_SOURCE');
+
         $hasMore = true;
         $nextOldest = $this->fetchOldest() + 1;
         while ($hasMore) {
             $result = $this->fetchMessage($nextOldest);
-            $data = json_decode((string)$result);
-            if ($data && isset($data->messages[0])) {
-                $this->out('Found new message: ' . ($data->messages[0]->client_msg_id ?? '(no client_msg_id)'));
-                $timestamp = (float) $data->messages[0]->ts;
-                $this->storeMessages($timestamp, json_encode($data->messages[0]));
-                $hasMore = ((int) $data->has_more) === 1;
+            $data = json_decode((string)$result, true);
+            if ($data && isset($data['messages'][0])) {
+                $this->out('Found new message: ' . ($data['messages'][0]['client_msg_id'] ?? '(no client_msg_id)'));
+                $timestamp = (float) $data['messages'][0]['ts'];
+                $storedID = $this->storeMessages($timestamp, json_encode($data['messages'][0]));
+
+                if ($relaySource === 'Receipt' and !is_null($storedID) and $storedID !== 0) {
+                    $this->relayMessage(
+                        destinationType: $relayType,
+                        id: $storedID,
+                        ts: $timestamp,
+                        message: $data['messages'][0]
+                    );
+                }
+
+                $hasMore = ((int) $data['has_more']) === 1;
                 $nextOldest = $timestamp + 1;
             } else {
                 $hasMore = false;
             }
+        }
+        if ($relaySource === 'Database') {
+            $this->relayBacklog($relayType);
         }
         $this->out('Finished.');
     }
@@ -76,13 +92,157 @@ class Listener
         return (float)  (isset($rows[0]) ? $rows[0]['message_ts'] : 1630447200); // fallback to Sept. 1 2021
     }
 
-    private function storeMessages(float $ts, string $message): void
+    private function storeMessages(float $ts, string $message): ?int
     {
         $insert = $this->getPDO()->prepare(
-            'INSERT INTO messages (channel, message_ts, message) 
-            VALUES (:channel, :message_ts, :message)'
+            'INSERT INTO messages (channel, message_ts, message, relayed)
+            VALUES (:channel, :message_ts, :message, :relayed);'
         );
-        $insert->execute([':channel' => $this->channel, ':message_ts' => $ts, ':message' => $message]);
+        $insert->execute([':channel' => $this->channel, ':message_ts' => $ts, ':message' => $message, ':relayed' => 0]);
+        $insertedID = $this->getPDO()->lastInsertId();
+
+        return (int) $insertedID;
+    }
+
+    private function relayBacklog(string $destinationType): void
+    {
+        $stmt = $this->getPDO()->prepare('SELECT id, message_ts, message FROM messages WHERE relayed=:relayed ORDER BY message_ts ASC');
+        $stmt->execute([':relayed' => 0]);
+        $foundMessages = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+        foreach ($foundMessages as $eachMessage) {
+
+            $this->relayMessage(
+                destinationType: $destinationType,
+                id: (int)$eachMessage["id"],
+                ts: (float)$eachMessage["message_ts"],
+                message: json_decode($eachMessage["message"], true)
+            );
+
+        }
+
+    }
+
+    private function parseHeaders(array $headerList) {
+
+        $parsedHeaders = ["Status Code" => $headerList[0], "Headers" => []];
+
+        foreach (array_slice($headerList, 1) as $eachHeader) {
+
+            $splitHeader = explode(":", strtolower($eachHeader));
+            $headerTitle = $splitHeader[0];
+            $headerData = implode(":", array_slice($splitHeader, 1));
+
+            $parsedHeaders["Headers"][$headerTitle] = $headerData;
+
+        }
+
+        return $parsedHeaders;
+
+    }
+
+    private function relayMessage(string $destinationType, int $id, float $ts, array $message): void
+    {
+        if ($destinationType !== "None") {
+
+            $destinationURL = (string) getenv('SLACK_LISTENER_RELAY_WEBHOOK');
+
+            $context = [
+                "http" => [
+                    "header" => [
+                        "Content-Type: application/json"
+                    ],
+                    "method" => "POST"
+                ]
+            ];
+
+            if ($destinationType === "Discord") {
+
+                $context["http"]["content"] = json_encode([
+                    "content" => str_replace(["<!everyone>", "<!channel>", "<!here>", "*", "_"], ["@everyone", "@everyone", "@here", "**", "*"] , $message["text"]),
+                    "embeds" => [
+                        [
+                            "color" => 15844367,
+                            "footer" => [
+                                "text" => "Original message sent on " . date('F jS, Y \a\t G:i:s \U\T\C', (int)$ts) . "."
+                            ]
+                        ]
+                    ]
+                ]);
+
+            }
+            elseif ($destinationType === "Slack") {
+
+                $context["http"]["content"] = json_encode([
+                    "text" => $message["text"],
+                    "blocks" => [
+                        [
+                			"type" => "section",
+                			"text" => [
+                					"type" => "mrkdwn",
+                					"text" => $message["text"]
+            				]
+                		],
+                		[
+                			"type" => "divider"
+                		],
+                		[
+                			"type" => "context",
+                			"elements" => [
+                				[
+                					"type" => "mrkdwn",
+                					"text" => "Original message sent on " . date('F jS, Y \a\t G:i:s \U\T\C', (int)$ts) . "."
+                				]
+                			]
+                		]
+                	]
+                ]);
+
+            }
+
+            for ($remainingRetries = 5; $remainingRetries >= 0; $remainingRetries--) {
+
+                $finalizedContext = stream_context_create($context);
+                $request = file_get_contents(
+                    filename: $destinationURL,
+                    context: $finalizedContext
+                );
+
+                $responseHeaders = $this->parseHeaders($http_response_header);
+
+                if (str_contains($responseHeaders["Status Code"], "204") or str_contains($responseHeaders["Status Code"], "200")) {
+
+                    $update = $this->getPDO()->prepare('UPDATE messages SET relayed=:relayed WHERE id=:id');
+                    $update->execute([':relayed' => 1, ':id' => $id]);
+
+                    $this->out("Relayed " . (isset($message["client_msg_id"]) ? $message["client_msg_id"] : "(no client_msg_id)"));
+
+                    sleep(1);
+
+                    break;
+
+                }
+                elseif (isset($responseHeaders["Headers"]["retry-after"])) {
+
+                    $waitTime = ($responseHeaders["Headers"]["retry-after"] <= 120 ? $responseHeaders["Headers"]["retry-after"] : ceil($responseHeaders["Headers"]["retry-after"] / 1000));
+
+                    $this->out("Encountered a Rate-Limit relaying " . (isset($message["client_msg_id"]) ? $message["client_msg_id"] : "(no client_msg_id)") . ". Waiting " . $waitTime . " seconds with " . $remainingRetries . " attempts remaining...");
+
+                    sleep((int)$waitTime);
+
+                }
+                else {
+
+                    $this->out("Encountered an error relaying " . (isset($message["client_msg_id"]) ? $message["client_msg_id"] : "(no client_msg_id)") . ". " . $remainingRetries . " attempts remaining...");
+
+                    sleep(1);
+
+                }
+
+            }
+
+        }
+
     }
 
     private function getPDO(): PDO

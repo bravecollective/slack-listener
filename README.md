@@ -11,6 +11,7 @@
         channel    varchar(255) not null,
         message_ts double       not null,
         message    mediumtext   not null,
+        relayed    tinyint      default 0   not null,
         constraint messages_id_uindex unique (id)
     );
     create index messages_ts__index on messages (message_ts);
@@ -19,4 +20,11 @@
 - Setup a cron job, example:
     ```
     35 */8 * * * user . /path/to/.env.sh && /path/to/bin/console run >> /path/to/results-`date +\%Y-\%m`.log
+    ```
+## Updating the Database Schema
+
+If you're updating from a version without relay functionality, modify the messages table as follows:
+
+    ```sql
+    ALTER TABLE messages ADD relayed tinyint default 0 not null;
     ```
