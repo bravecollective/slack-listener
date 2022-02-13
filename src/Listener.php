@@ -10,6 +10,7 @@ use function json_decode;
 class Listener
 {
     private string $channel;
+    private array $knownUsers = [];
 
     private ?PDO $pdo = null;
 
@@ -123,6 +124,32 @@ class Listener
 
     }
 
+    private function getUser(string $userID) {
+
+        $rateLimit = 50;
+        if ($this->slackRequestCount > 0) {
+            $sleepInSeconds = ceil(60/$rateLimit*10)/10;
+            usleep((int) ($sleepInSeconds * 1000 * 1000));
+        }
+        $this->slackRequestCount ++;
+
+        $token = getenv('SLACK_LISTENER_TOKEN');
+        $opts = [
+            "http" => [
+                "method" => 'GET',
+                "header" => "Authorization: Bearer $token",
+            ]
+        ];
+        $context = stream_context_create($opts);
+
+        // https://api.slack.com/methods/users.info
+        $path = "/users.info?user=$userID";
+        $data = file_get_contents("https://slack.com/api$path", false, $context);
+
+        return $data !== false ? $data : null;
+
+    }
+
     private function parseHeaders(array $headerList) {
 
         $parsedHeaders = ["Status Code" => $headerList[0], "Headers" => []];
@@ -156,15 +183,49 @@ class Listener
                 ]
             ];
 
+            if (!isset($this->knownUsers[$message["user"]])) {
+
+                $userInfo = $this->getUser($message["user"]);
+                if (!is_null($userInfo)) {
+
+                    $parsedUserInfo = json_decode($userInfo, true);
+
+                    $this->knownUsers[$message["user"]] = [
+                        "Name" => $parsedUserInfo["user"]["profile"]["real_name"],
+                        "Username" => $parsedUserInfo["user"]["profile"]["display_name"],
+                        "Image" => ((isset($parsedUserInfo["user"]["profile"]["image_original"])) ? $parsedUserInfo["user"]["profile"]["image_original"] : null),
+                    ];
+
+                }
+
+            }
+
+            if (isset($this->knownUsers[$message["user"]])) {
+
+                $relayedName = $this->knownUsers[$message["user"]]["Name"];
+                $relayedUsername = $this->knownUsers[$message["user"]]["Username"];
+                $relayedImage = $this->knownUsers[$message["user"]]["Image"];
+
+            }
+            else {
+
+                $relayedName = "Unknown User " . $message["user"];
+                $relayedUsername = $message["user"];
+                $relayedImage = null;
+
+            }
+
             if ($destinationType === "Discord") {
 
                 $context["http"]["content"] = json_encode([
+                    "username" => $relayedName,
+                    "avatar_url" => $relayedImage,
                     "content" => str_replace(["<!everyone>", "<!channel>", "<!here>", "*", "_"], ["@everyone", "@everyone", "@here", "**", "*"] , $message["text"]),
                     "embeds" => [
                         [
                             "color" => 15844367,
                             "footer" => [
-                                "text" => "Original message sent on " . date('F jS, Y \a\t G:i:s \U\T\C', (int)$ts) . "."
+                                "text" => "Original message sent by " . $relayedUsername . " on " . date('F jS, Y \a\t G:i:s \U\T\C', (int)$ts) . "."
                             ]
                         ]
                     ]
@@ -191,7 +252,7 @@ class Listener
                 			"elements" => [
                 				[
                 					"type" => "mrkdwn",
-                					"text" => "Original message sent on " . date('F jS, Y \a\t G:i:s \U\T\C', (int)$ts) . "."
+                					"text" => "Original message sent by " . $relayedUsername . " on " . date('F jS, Y \a\t G:i:s \U\T\C', (int)$ts) . "."
                 				]
                 			]
                 		]
