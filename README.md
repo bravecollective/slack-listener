@@ -23,8 +23,7 @@
     ```
 ## Updating the Database Schema
 
-If you're updating from a version without relay functionality, modify the messages table as follows:
-
+- If you're updating from a version without relay functionality, modify the messages table as follows:
     ```sql
-    ALTER TABLE messages ADD relayed tinyint default 0 not null;
+    alter table messages add relayed tinyint default 0 not null;
     ```
