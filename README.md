@@ -13,7 +13,7 @@
         message    mediumtext   not null,
         relayed    tinyint      default 0   not null,
         constraint messages_id_uindex unique (id)
-    );
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
     create index messages_ts__index on messages (message_ts);
     ```
 - Set environment variables, see .env.sh.dist
