@@ -178,9 +178,9 @@ class Listener
                 "username" => $relayedName,
                 "avatar_url" => $relayedImage,
                 "content" => str_replace(
-                    ["<!everyone>", "<!channel>", "<!here>", "*", "_"],
-                    ["@everyone", "@everyone", "@here", "**", "*"] ,
-                    $message["text"]
+                    ["<!everyone>", "<!channel>", "<!here>", "*"],
+                    ["@everyone", "@everyone", "@here", "**"] ,
+                    htmlspecialchars_decode($message["text"])
                 ),
                 "embeds" => [
                     [
@@ -194,13 +194,13 @@ class Listener
             ]);
         } elseif ($destinationType === "Slack") {
             $context["http"]["content"] = json_encode([
-                "text" => $message["text"],
+                "text" => htmlspecialchars_decode($message["text"]),
                 "blocks" => [
                     [
                         "type" => "section",
                         "text" => [
                             "type" => "mrkdwn",
-                            "text" => $message["text"]
+                            "text" => htmlspecialchars_decode($message["text"])
                         ]
                     ],
                     [
