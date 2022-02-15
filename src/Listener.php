@@ -37,15 +37,11 @@ class Listener
             if ($data && isset($data['messages'][0])) {
                 $this->out('Found new message: ' . ($data['messages'][0]['client_msg_id'] ?? '(no client_msg_id)'));
                 $timestamp = (float) $data['messages'][0]['ts'];
+
                 $storedID = $this->storeMessages($timestamp, json_encode($data['messages'][0]));
 
                 if ($relaySource === 'Receipt' and !is_null($storedID) and $storedID !== 0) {
-                    $this->relayMessage(
-                        $relayType,
-                        $storedID,
-                        $timestamp,
-                        $data['messages'][0]
-                    );
+                    $this->relayMessage($relayType, $storedID, $timestamp, $data['messages'][0]);
                 }
 
                 $hasMore = ((int) $data['has_more']) === 1;
@@ -54,29 +50,17 @@ class Listener
                 $hasMore = false;
             }
         }
+
         if ($relaySource === 'Database') {
             $this->relayBacklog($relayType);
         }
+
         $this->out('Finished.');
     }
 
     private function fetchMessage(float $oldest): ?string
     {
-        $rateLimit = 50;
-        if ($this->slackRequestCount > 0) {
-            $sleepInSeconds = ceil(60/$rateLimit*10)/10;
-            usleep((int) ($sleepInSeconds * 1000 * 1000));
-        }
-        $this->slackRequestCount ++;
-
-        $token = getenv('SLACK_LISTENER_TOKEN');
-        $opts = [
-            "http" => [
-                "method" => 'GET',
-                "header" => "Authorization: Bearer $token",
-            ]
-        ];
-        $context = stream_context_create($opts);
+        $context = $this->getContext();
 
         // https://api.slack.com/methods/conversations.history
         $path = "/conversations.history?channel=$this->channel&limit=1&oldest=$oldest";
@@ -108,205 +92,166 @@ class Listener
 
     private function relayBacklog(string $destinationType): void
     {
-        $stmt = $this->getPDO()->prepare('SELECT id, message_ts, message FROM messages WHERE relayed=:relayed ORDER BY message_ts ASC');
+        $stmt = $this
+            ->getPDO()
+            ->prepare('SELECT id, message_ts, message FROM messages WHERE relayed=:relayed ORDER BY message_ts');
         $stmt->execute([':relayed' => 0]);
         $foundMessages = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
         foreach ($foundMessages as $eachMessage) {
-
             $this->relayMessage(
                 $destinationType,
                 (int)$eachMessage["id"],
                 (float)$eachMessage["message_ts"],
                 json_decode($eachMessage["message"], true)
             );
-
         }
-
     }
 
-    private function getUser(string $userID) {
-
-        $rateLimit = 50;
-        if ($this->slackRequestCount > 0) {
-            $sleepInSeconds = ceil(60/$rateLimit*10)/10;
-            usleep((int) ($sleepInSeconds * 1000 * 1000));
-        }
-        $this->slackRequestCount ++;
-
-        $token = getenv('SLACK_LISTENER_TOKEN');
-        $opts = [
-            "http" => [
-                "method" => 'GET',
-                "header" => "Authorization: Bearer $token",
-            ]
-        ];
-        $context = stream_context_create($opts);
+    private function getUser(string $userID): ?string
+    {
+        $context = $this->getContext();
 
         // https://api.slack.com/methods/users.info
         $path = "/users.info?user=$userID";
         $data = file_get_contents("https://slack.com/api$path", false, $context);
 
         return $data !== false ? $data : null;
-
     }
 
-    private function parseHeaders(array $headerList) {
-
+    private function parseHeaders(array $headerList): array
+    {
         $parsedHeaders = ["Status Code" => $headerList[0], "Headers" => []];
 
         foreach (array_slice($headerList, 1) as $eachHeader) {
-
             $splitHeader = explode(":", strtolower($eachHeader));
             $headerTitle = $splitHeader[0];
             $headerData = implode(":", array_slice($splitHeader, 1));
 
             $parsedHeaders["Headers"][$headerTitle] = $headerData;
-
         }
 
         return $parsedHeaders;
-
     }
 
     private function relayMessage(string $destinationType, int $id, float $ts, array $message): void
     {
-        if ($destinationType !== "None") {
+        if ($destinationType === "None") {
+            return;
+        }
 
-            $destinationURL = (string) getenv('SLACK_LISTENER_RELAY_WEBHOOK');
+        $destinationURL = (string) getenv('SLACK_LISTENER_RELAY_WEBHOOK');
+        $context = [
+            "http" => [
+                "ignore_errors" => true,
+                "header" => [
+                    "Content-Type: application/json"
+                ],
+                "method" => "POST"
+            ]
+        ];
 
-            $context = [
-                "http" => [
-                    "ignore_errors" => true,
-                    "header" => [
-                        "Content-Type: application/json"
-                    ],
-                    "method" => "POST"
+        if (!isset($this->knownUsers[$message["user"]])) {
+            $userInfo = $this->getUser($message["user"]);
+            if (!is_null($userInfo)) {
+                $parsedUserInfo = json_decode($userInfo, true);
+                $this->knownUsers[$message["user"]] = [
+                    "Name" => $parsedUserInfo["user"]["profile"]["real_name"],
+                    "Username" => $parsedUserInfo["user"]["profile"]["display_name"],
+                    "Image" => $parsedUserInfo["user"]["profile"]["image_original"] ?? null,
+                ];
+            }
+        }
+
+        if (isset($this->knownUsers[$message["user"]])) {
+            $relayedName = $this->knownUsers[$message["user"]]["Name"];
+            $relayedUsername = $this->knownUsers[$message["user"]]["Username"];
+            $relayedImage = $this->knownUsers[$message["user"]]["Image"];
+        } else {
+            $relayedName = "Unknown User " . $message["user"];
+            $relayedUsername = $message["user"];
+            $relayedImage = null;
+        }
+
+        if ($destinationType === "Discord") {
+            $context["http"]["content"] = json_encode([
+                "username" => $relayedName,
+                "avatar_url" => $relayedImage,
+                "content" => str_replace(
+                    ["<!everyone>", "<!channel>", "<!here>", "*", "_"],
+                    ["@everyone", "@everyone", "@here", "**", "*"] ,
+                    $message["text"]
+                ),
+                "embeds" => [
+                    [
+                        "color" => 15844367,
+                        "footer" => [
+                            "text" => "Original message sent by " . $relayedUsername . " on " .
+                                date('F jS, Y \a\t G:i:s \U\T\C', (int)$ts) . "."
+                        ]
+                    ]
                 ]
-            ];
-
-            if (!isset($this->knownUsers[$message["user"]])) {
-
-                $userInfo = $this->getUser($message["user"]);
-                if (!is_null($userInfo)) {
-
-                    $parsedUserInfo = json_decode($userInfo, true);
-
-                    $this->knownUsers[$message["user"]] = [
-                        "Name" => $parsedUserInfo["user"]["profile"]["real_name"],
-                        "Username" => $parsedUserInfo["user"]["profile"]["display_name"],
-                        "Image" => ((isset($parsedUserInfo["user"]["profile"]["image_original"])) ? $parsedUserInfo["user"]["profile"]["image_original"] : null),
-                    ];
-
-                }
-
-            }
-
-            if (isset($this->knownUsers[$message["user"]])) {
-
-                $relayedName = $this->knownUsers[$message["user"]]["Name"];
-                $relayedUsername = $this->knownUsers[$message["user"]]["Username"];
-                $relayedImage = $this->knownUsers[$message["user"]]["Image"];
-
-            }
-            else {
-
-                $relayedName = "Unknown User " . $message["user"];
-                $relayedUsername = $message["user"];
-                $relayedImage = null;
-
-            }
-
-            if ($destinationType === "Discord") {
-
-                $context["http"]["content"] = json_encode([
-                    "username" => $relayedName,
-                    "avatar_url" => $relayedImage,
-                    "content" => str_replace(["<!everyone>", "<!channel>", "<!here>", "*", "_"], ["@everyone", "@everyone", "@here", "**", "*"] , $message["text"]),
-                    "embeds" => [
-                        [
-                            "color" => 15844367,
-                            "footer" => [
-                                "text" => "Original message sent by " . $relayedUsername . " on " . date('F jS, Y \a\t G:i:s \U\T\C', (int)$ts) . "."
+            ]);
+        } elseif ($destinationType === "Slack") {
+            $context["http"]["content"] = json_encode([
+                "text" => $message["text"],
+                "blocks" => [
+                    [
+                        "type" => "section",
+                        "text" => [
+                            "type" => "mrkdwn",
+                            "text" => $message["text"]
+                        ]
+                    ],
+                    [
+                        "type" => "divider"
+                    ],
+                    [
+                        "type" => "context",
+                        "elements" => [
+                            [
+                                "type" => "mrkdwn",
+                                "text" => "Original message sent by " . $relayedUsername . " on " .
+                                    date('F jS, Y \a\t G:i:s \U\T\C', (int)$ts) . "."
                             ]
                         ]
                     ]
-                ]);
-
-            }
-            elseif ($destinationType === "Slack") {
-
-                $context["http"]["content"] = json_encode([
-                    "text" => $message["text"],
-                    "blocks" => [
-                        [
-                			"type" => "section",
-                			"text" => [
-                					"type" => "mrkdwn",
-                					"text" => $message["text"]
-            				]
-                		],
-                		[
-                			"type" => "divider"
-                		],
-                		[
-                			"type" => "context",
-                			"elements" => [
-                				[
-                					"type" => "mrkdwn",
-                					"text" => "Original message sent by " . $relayedUsername . " on " . date('F jS, Y \a\t G:i:s \U\T\C', (int)$ts) . "."
-                				]
-                			]
-                		]
-                	]
-                ]);
-
-            }
-
-            for ($remainingRetries = 5; $remainingRetries >= 0; $remainingRetries--) {
-
-                $finalizedContext = stream_context_create($context);
-                $request = file_get_contents(
-                    $destinationURL,
-                    false,
-                    $finalizedContext
-                );
-
-                $responseHeaders = $this->parseHeaders($http_response_header);
-
-                if (strpos($responseHeaders["Status Code"], "204") !== false or strpos($responseHeaders["Status Code"], "200") !== false) {
-
-                    $update = $this->getPDO()->prepare('UPDATE messages SET relayed=:relayed WHERE id=:id');
-                    $update->execute([':relayed' => 1, ':id' => $id]);
-
-                    $this->out("Relayed " . (isset($message["client_msg_id"]) ? $message["client_msg_id"] : "(no client_msg_id)"));
-
-                    sleep(1);
-
-                    break;
-
-                }
-                elseif (isset($responseHeaders["Headers"]["retry-after"])) {
-
-                    $waitTime = ($responseHeaders["Headers"]["retry-after"] <= 120 ? $responseHeaders["Headers"]["retry-after"] : ceil($responseHeaders["Headers"]["retry-after"] / 1000));
-
-                    $this->out("Encountered a Rate-Limit relaying " . (isset($message["client_msg_id"]) ? $message["client_msg_id"] : "(no client_msg_id)") . ". Waiting " . $waitTime . " seconds with " . $remainingRetries . " attempts remaining...");
-
-                    sleep((int)$waitTime);
-
-                }
-                else {
-
-                    $this->out("Encountered an error relaying " . (isset($message["client_msg_id"]) ? $message["client_msg_id"] : "(no client_msg_id)") . ". " . $remainingRetries . " attempts remaining...");
-
-                    sleep(1);
-
-                }
-
-            }
-
+                ]
+            ]);
         }
 
+        for ($remainingRetries = 5; $remainingRetries >= 0; $remainingRetries--) {
+            $finalizedContext = stream_context_create($context);
+            /** @noinspection PhpExpressionResultUnusedInspection */
+            file_get_contents($destinationURL, false, $finalizedContext);
+            $responseHeaders = $this->parseHeaders($http_response_header);
+
+            if (
+                strpos($responseHeaders["Status Code"], "204") !== false ||
+                strpos($responseHeaders["Status Code"], "200") !== false
+            ) {
+                $update = $this->getPDO()->prepare('UPDATE messages SET relayed=:relayed WHERE id = :id');
+                $update->execute([':relayed' => 1, ':id' => $id]);
+                $this->out("Relayed " . ($message["client_msg_id"] ?? "(no client_msg_id)"));
+                sleep(1);
+                break;
+            } elseif (isset($responseHeaders["Headers"]["retry-after"])) {
+                $waitTime = ($responseHeaders["Headers"]["retry-after"] <= 120 ?
+                    $responseHeaders["Headers"]["retry-after"] :
+                    ceil($responseHeaders["Headers"]["retry-after"] / 1000));
+                $this->out(
+                    "Encountered a Rate-Limit relaying " . ($message["client_msg_id"] ?? "(no client_msg_id)") .
+                    ". Waiting " . $waitTime . " seconds with " . $remainingRetries . " attempts remaining..."
+                );
+                sleep((int)$waitTime);
+            } else {
+                $this->out(
+                    "Encountered an error relaying " . ($message["client_msg_id"] ?? "(no client_msg_id)") .
+                    ". " . $remainingRetries . " attempts remaining..."
+                );
+                sleep(1);
+            }
+        }
     }
 
     private function getPDO(): PDO
@@ -321,5 +266,28 @@ class Listener
     private function out(string $message): void
     {
         echo gmdate('Y-m-d H:i:s ') . $message . PHP_EOL;
+    }
+
+    /**
+     * @return resource
+     */
+    private function getContext()
+    {
+        $rateLimit = 50;
+        if ($this->slackRequestCount > 0) {
+            $sleepInSeconds = ceil(60 / $rateLimit * 10) / 10;
+            usleep((int)($sleepInSeconds * 1000 * 1000));
+        }
+        $this->slackRequestCount++;
+
+        $token = getenv('SLACK_LISTENER_TOKEN');
+        $opts = [
+            "http" => [
+                "method" => 'GET',
+                "header" => "Authorization: Bearer $token",
+            ]
+        ];
+
+        return stream_context_create($opts);
     }
 }
