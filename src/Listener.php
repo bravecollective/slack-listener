@@ -18,6 +18,7 @@ class Listener
 
     public function __construct()
     {
+        setlocale(LC_ALL, 'C');
         $this->channel = (string) getenv('SLACK_LISTENER_CHANNEL');
     }
 
