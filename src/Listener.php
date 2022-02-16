@@ -222,8 +222,7 @@ class Listener
 
         for ($remainingRetries = 5; $remainingRetries >= 0; $remainingRetries--) {
             $finalizedContext = stream_context_create($context);
-            /** @noinspection PhpExpressionResultUnusedInspection */
-            file_get_contents($destinationURL, false, $finalizedContext);
+            $response = file_get_contents($destinationURL, false, $finalizedContext);
             $responseHeaders = $this->parseHeaders($http_response_header);
 
             if (
@@ -249,6 +248,7 @@ class Listener
                     "Encountered an error relaying " . ($message["client_msg_id"] ?? "(no client_msg_id)") .
                     ". " . $remainingRetries . " attempts remaining..."
                 );
+                $this->out((string)$response);
                 sleep(1);
             }
         }
