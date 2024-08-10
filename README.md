@@ -1,5 +1,7 @@
 # slack-listener
 
+Needs PHP 8.1+.
+
 - Create a Slack application at https://api.slack.com/apps.
 - Got to: Add features and functionality -> Permissions -> Bot Token Scopes and add channels:history (or groups:history for a private channel), and users:read.
 - Install to Workspace.

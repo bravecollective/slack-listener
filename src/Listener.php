@@ -10,6 +10,7 @@ use function json_decode;
 class Listener
 {
     private string $channel;
+
     private array $knownUsers = [];
 
     private ?PDO $pdo = null;
@@ -19,15 +20,15 @@ class Listener
     public function __construct()
     {
         setlocale(LC_ALL, 'C');
-        $this->channel = (string) getenv('SLACK_LISTENER_CHANNEL');
+        $this->channel = (string)getenv('SLACK_LISTENER_CHANNEL');
     }
 
     public function run(): void
     {
         $this->out('Starting.');
 
-        $relayType = (string) getenv('SLACK_LISTENER_RELAY_TYPE');
-        $relaySource = (string) getenv('SLACK_LISTENER_RELAY_SOURCE');
+        $relayType = (string)getenv('SLACK_LISTENER_RELAY_TYPE');
+        $relaySource = (string)getenv('SLACK_LISTENER_RELAY_SOURCE');
 
         $hasMore = true;
         $nextOldest = $this->fetchOldest() + 1;
@@ -35,16 +36,18 @@ class Listener
             $result = $this->fetchMessage($nextOldest);
             $data = json_decode((string)$result, true);
             if ($data && isset($data['messages'][0])) {
-                $this->out('Found new message: ' . ($data['messages'][0]['client_msg_id'] ?? '(no client_msg_id)'));
-                $timestamp = (float) $data['messages'][0]['ts'];
+                $this->out(
+                    'Found new message: ' .
+                    ($data['messages'][0]['client_msg_id'] ?? '(no client_msg_id)')
+                );
+                $timestamp = (float)$data['messages'][0]['ts'];
 
                 $storedID = $this->storeMessages($timestamp, json_encode($data['messages'][0]));
-
                 if ($relaySource === 'Receipt' and !is_null($storedID) and $storedID !== 0) {
                     $this->relayMessage($relayType, $storedID, $timestamp, $data['messages'][0]);
                 }
 
-                $hasMore = ((int) $data['has_more']) === 1;
+                $hasMore = ((int)$data['has_more']) === 1;
                 $nextOldest = $timestamp + 1;
             } else {
                 $hasMore = false;
@@ -75,7 +78,7 @@ class Listener
         $stmt->execute();
         $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
-        return (float)  (isset($rows[0]) ? $rows[0]['message_ts'] : 1630447200); // fallback to Sept. 1 2021
+        return (float)(isset($rows[0]) ? $rows[0]['message_ts'] : 1630447200); // fallback to Sept. 1 2021
     }
 
     private function storeMessages(float $ts, string $message): ?int
@@ -84,17 +87,23 @@ class Listener
             'INSERT INTO messages (channel, message_ts, message, relayed)
             VALUES (:channel, :message_ts, :message, :relayed);'
         );
-        $insert->execute([':channel' => $this->channel, ':message_ts' => $ts, ':message' => $message, ':relayed' => 0]);
+        $insert->execute([
+            ':channel' => $this->channel,
+            ':message_ts' => $ts,
+            ':message' => $message,
+            ':relayed' => 0
+        ]);
         $insertedID = $this->getPDO()->lastInsertId();
 
-        return (int) $insertedID;
+        return (int)$insertedID;
     }
 
     private function relayBacklog(string $destinationType): void
     {
         $stmt = $this
             ->getPDO()
-            ->prepare('SELECT id, message_ts, message FROM messages WHERE relayed=:relayed ORDER BY message_ts');
+            ->prepare('SELECT id, message_ts, message FROM messages 
+                       WHERE relayed=:relayed ORDER BY message_ts');
         $stmt->execute([':relayed' => 0]);
         $foundMessages = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
@@ -136,50 +145,38 @@ class Listener
 
     private function getSubstrings(string $initialMessage, string $destinationType): array
     {
-        //Slack's Message Limit is documented as 40,000 characters, however the actual limit seems to be around only a couple thousand.
+        // Slack's Message Limit is documented as 40,000 characters, however the actual limit
+        // seems to be around only a couple thousand.
         $maxLengths = [
             "Discord" => 2000,
             "Slack" => 2000
         ];
-
         $messageArray = [""];
         $currentIndex = 0;
-
-        $lineSplit = preg_split("/([\\n])/", $initialMessage, -1, PREG_SPLIT_DELIM_CAPTURE);
-
+        $lineSplit = preg_split("/(\n)/", $initialMessage, -1, PREG_SPLIT_DELIM_CAPTURE);
         foreach ($lineSplit as $eachLine) {
-
-            if (strlen($messageArray[$currentIndex]) + strlen($eachLine) > $maxLengths[$destinationType]) {
-
-                $sentenceSplit = preg_split("/([\.\?\!])/", $eachLine, -1, PREG_SPLIT_DELIM_CAPTURE);
-
+            if (
+                strlen($messageArray[$currentIndex]) + strlen($eachLine) >
+                $maxLengths[$destinationType]
+            ) {
+                $sentenceSplit = preg_split("/([.?!])/", $eachLine, -1, PREG_SPLIT_DELIM_CAPTURE);
                 foreach ($sentenceSplit as $eachSentence) {
-
-                    if (strlen($messageArray[$currentIndex]) + strlen($eachSentence) > $maxLengths[$destinationType]) {
-
+                    if (
+                        strlen($messageArray[$currentIndex]) + strlen($eachSentence) >
+                        $maxLengths[$destinationType]
+                    ) {
                         $currentIndex++;
                         $messageArray[$currentIndex] = $eachSentence;
-
-                    }
-                    else {
-
+                    } else {
                         $messageArray[$currentIndex] .= $eachSentence;
-
                     }
-
                 }
-
-            }
-            else {
-
+            } else {
                 $messageArray[$currentIndex] .= $eachLine;
-
             }
-
         }
 
         return $messageArray;
-
     }
 
     private function relayMessage(string $destinationType, int $id, float $ts, array $message): void
@@ -188,7 +185,7 @@ class Listener
             return;
         }
 
-        $destinationURL = (string) getenv('SLACK_LISTENER_RELAY_WEBHOOK');
+        $destinationURL = (string)getenv('SLACK_LISTENER_RELAY_WEBHOOK');
         $context = [
             "http" => [
                 "ignore_errors" => true,
@@ -203,17 +200,18 @@ class Listener
             $userInfo = $this->getUser($message["user"]);
             if (!is_null($userInfo)) {
                 $parsedUserInfo = json_decode($userInfo, true);
-
                 if ($parsedUserInfo["ok"]) {
-
                     $this->knownUsers[$message["user"]] = [
                         "Name" => $parsedUserInfo["user"]["profile"]["real_name"],
-                        "Username" => (isset($parsedUserInfo["user"]["profile"]["display_name"]) and $parsedUserInfo["user"]["profile"]["display_name"] !== "") ? $parsedUserInfo["user"]["profile"]["display_name"] : $parsedUserInfo["user"]["profile"]["real_name"],
+                        "Username" => (
+                            isset($parsedUserInfo["user"]["profile"]["display_name"]) &&
+                            $parsedUserInfo["user"]["profile"]["display_name"] !== ""
+                        ) ?
+                            $parsedUserInfo["user"]["profile"]["display_name"] :
+                            $parsedUserInfo["user"]["profile"]["real_name"],
                         "Image" => $parsedUserInfo["user"]["profile"]["image_original"] ?? null,
                     ];
-
                 }
-
             }
         }
 
@@ -240,13 +238,12 @@ class Listener
                     "avatar_url" => $relayedImage,
                     "content" => str_replace(
                         ["<!everyone>", "<!channel>", "<!here>", "*"],
-                        ["@everyone", "@everyone", "@here", "**"] ,
+                        ["@everyone", "@everyone", "@here", "**"],
                         htmlspecialchars_decode($eachRelay)
                     )
                 ];
 
                 if ($partsCounter === count($relayList)) {
-
                     $context["http"]["content"]["embeds"] = [
                         [
                             "color" => 15844367,
@@ -256,9 +253,7 @@ class Listener
                             ]
                         ]
                     ];
-
                 }
-
             } elseif ($destinationType === "Slack") {
                 $context["http"]["content"] = [
                     "text" => htmlspecialchars_decode($eachRelay),
@@ -296,14 +291,15 @@ class Listener
                 $finalizedContext = stream_context_create($context);
                 $response = file_get_contents($destinationURL, false, $finalizedContext);
                 $responseHeaders = $this->parseHeaders($http_response_header);
-
                 if (
-                    strpos($responseHeaders["Status Code"], "204") !== false ||
-                    strpos($responseHeaders["Status Code"], "200") !== false
+                    str_contains($responseHeaders["Status Code"], "204") ||
+                    str_contains($responseHeaders["Status Code"], "200")
                 ) {
-
                     $successfullySent++;
-                    $this->out("Relayed " . ($message["client_msg_id"] ?? "(no client_msg_id)") . " part " . $partsCounter . " / " . count($relayList));
+                    $this->out(
+                        "Relayed " . ($message["client_msg_id"] ?? "(no client_msg_id)") . " part " .
+                        $partsCounter . " / " . count($relayList)
+                    );
                     sleep(1);
                     break;
                 } elseif (isset($responseHeaders["Headers"]["retry-after"])) {
@@ -311,12 +307,18 @@ class Listener
                         $responseHeaders["Headers"]["retry-after"] :
                         ceil($responseHeaders["Headers"]["retry-after"] / 1000));
                     $this->out(
-                        "Encountered a Rate-Limit relaying " . ($message["client_msg_id"] ?? "(no client_msg_id)") . " part " . $partsCounter . " / " . count($relayList) . ". Waiting " . $waitTime . " seconds with " . $remainingRetries . " attempts remaining..."
+                        "Encountered a Rate-Limit relaying " .
+                        ($message["client_msg_id"] ?? "(no client_msg_id)") .
+                        " part " . $partsCounter . " / " . count($relayList) . ". Waiting " .
+                        $waitTime . " seconds with " . $remainingRetries . " attempts remaining..."
                     );
                     sleep((int)$waitTime);
                 } else {
                     $this->out(
-                        "Encountered an error relaying " . ($message["client_msg_id"] ?? "(no client_msg_id)") . " part " . $partsCounter . " / " . count($relayList) . ". " . $remainingRetries . " attempts remaining..."
+                        "Encountered an error relaying " .
+                        ($message["client_msg_id"] ?? "(no client_msg_id)") .
+                        " part " . $partsCounter . " / " . count($relayList) . ". " .
+                        $remainingRetries . " attempts remaining..."
                     );
                     $this->out((string)$response);
                     sleep(1);
@@ -324,7 +326,6 @@ class Listener
             }
 
             $partsCounter++;
-
         }
 
         if ($successfullySent > 0) {
@@ -332,11 +333,11 @@ class Listener
             $update->execute([':relayed' => 1, ':id' => $id]);
 
             if ($successfullySent !== count($relayList)) {
-
                 $this->out(
-                    "Some parts of " . ($message["client_msg_id"] ?? "(no client_msg_id)") . " failed to relay! Because part of the message successfully relayed it will not attempt to be relayed again."
+                    "Some parts of " . ($message["client_msg_id"] ?? "(no client_msg_id)") .
+                    " failed to relay! Because part of the message successfully relayed it will" .
+                    " not attempt to be relayed again."
                 );
-
             }
         }
     }
